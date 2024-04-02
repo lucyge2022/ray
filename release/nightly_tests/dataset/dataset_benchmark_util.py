@@ -309,7 +309,7 @@ def get_prop_raw_image_paths(num_workers, target_worker_gb):
     """Get a subset of imagenet raw image paths such that the dataset can be divided
     evenly across workers, with each receiving target_worker_gb GB of data.
     The resulting dataset size is roughly num_workers * target_worker_gb GB."""
-    img_s3_root = "s3://anyscale-imagenet/ILSVRC/Data/CLS-LOC/train"
+    img_s3_root = "s3://ai-ref-arch/imagenet-full/train"
     if target_worker_gb == -1:
         # Return the entire dataset.
         return img_s3_root
@@ -328,27 +328,20 @@ def get_prop_raw_image_paths(num_workers, target_worker_gb):
 
 
 def get_prop_parquet_paths(num_workers, target_worker_gb):
-    parquet_s3_dir = "s3://anyscale-imagenet/parquet"
-    parquet_s3_root = f"{parquet_s3_dir}/d76458f84f2544bdaac158d1b6b842da"
+    # Total Objects: 903 Total Size: 208.1 GiB
+    parquet_s3_dir = "s3://ai-ref-arch/imagenet-full-parquet/train/3Xd3defc4/"
     if target_worker_gb == -1:
         # Return the entire dataset.
         return parquet_s3_dir
 
-    mb_per_file = 128
-    num_files = 200
-    TARGET_NUM_FILES = min(
+    mb_per_file = 230
+    num_files = 903
+    target_num_files = min(
         math.ceil(target_worker_gb * num_workers * 1024 / mb_per_file), num_files
     )
     file_paths = []
-    for fi in range(num_files):
-        for i in range(5):
-            if not (fi in [163, 164, 174, 181, 183, 190] and i == 4):
-                # for some files, they only have 4 shards instead of 5.
-                file_paths.append(f"{parquet_s3_root}_{fi:06}_{i:06}.parquet")
-            if len(file_paths) >= TARGET_NUM_FILES:
-                break
-        if len(file_paths) >= TARGET_NUM_FILES:
-            break
+    for i in range(target_num_files):
+        file_paths.append(f"{parquet_s3_dir}imagenet_{i}.parquet")
     return file_paths
 
 

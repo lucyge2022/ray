@@ -25,6 +25,8 @@ from dataset_benchmark_util import (
     get_mosaic_epoch_size,
 )
 
+import fsspec
+from alluxiofs import AlluxioFileSystem
 
 # This benchmark does the following:
 # 1) Read files (images or parquet) with ray.data
@@ -34,6 +36,30 @@ from dataset_benchmark_util import (
 # - ray.torchtrainer.fit: Throughput of the final epoch in
 #   TorchTrainer.fit() (step 3 above)
 
+import subprocess
+import re
+import math
+
+def human_readable(n):
+    if n < 1024:
+        return f"{n} B"
+    elif n < 1048576:
+        return f"{n/1024:.2f} KB"
+    elif n < 1073741824:
+        return f"{n/1048576:.2f} MB"
+    else:
+        return f"{n/1073741824:.2f} GB"
+
+def get_received_bytes(interface_name='eth0'):
+    try:
+        output = subprocess.check_output(['ip', '-s', 'link', 'show', interface_name], text=True)
+        # Adjusted regular expression pattern to match the correct line
+        match = re.search(r'RX:\s+bytes\s+packets\s+errors\s+dropped\s+overrun\s+mcast\s+(\d+)', output)
+        if match:
+            return int(match.group(1))
+    except subprocess.CalledProcessError as e:
+        print(f"Error executing command: {e}")
+    return 0
 
 def parse_args():
     import argparse
@@ -129,6 +155,44 @@ def parse_args():
         default=False,
         help="Whether to cache output dataset (after preprocessing).",
     )
+    parser.add_argument(
+        "--object-store-memory",
+        default=-1,
+        type=int,
+        help="Object store memory. -1 means do not set user-specific object store memory.",
+    )
+    parser.add_argument(
+        "--train-sleep",
+        default=0,
+        type=float,
+        help="Total time to sleep in each batch training. Used to mock actual training time.",
+    )
+    parser.add_argument(
+        "--use-alluxio",
+        action="store_true",
+        default=False,
+        help="Whether to use Alluxio instead of original ufs filesystem for data loading.",
+    )
+    parser.add_argument(
+        "--alluxio-etcd-hosts",
+        default=None,
+        help="The ETCD host to connect to to get Alluxio workers connection info.",
+    )
+    parser.add_argument(
+        "--alluxio-worker-hosts",
+        default=None,
+        help="The worker hostnames in host1,host2,host3 format. Either etcd_host or worker_hosts should be provided, not both.",
+    )
+    parser.add_argument(
+        "--alluxio-page-size",
+        default=None,
+        help="The alluxio page size of Alluxio servers.",
+    )
+    parser.add_argument(
+        "--alluxio-cluster-name",
+        default=None,
+        help="The alluxio cluster name of the Alluxio servers.",
+    )
     args = parser.parse_args()
 
     ray.init(
@@ -160,6 +224,25 @@ def parse_args():
 # Constants and utility methods for image-based benchmarks.
 DEFAULT_IMAGE_SIZE = 224
 
+def setup_alluxio(args):
+    fsspec.register_implementation("alluxio", AlluxioFileSystem, clobber=True)
+    alluxio_kwargs = {}
+    if args.alluxio_etcd_hosts and args.alluxio_worker_hosts:
+        raise ValueError("Either etcd_hosts or worker_hosts should be provided, not both.")
+    if args.alluxio_etcd_hosts:
+        alluxio_kwargs['etcd_hosts'] = args.alluxio_etcd_hosts
+    if args.alluxio_worker_hosts:
+        alluxio_kwargs['worker_hosts'] = args.alluxio_worker_hosts
+    alluxio_kwargs['target_protocol'] = "s3"
+
+    alluxio_options = {}
+    if args.alluxio_page_size:
+        alluxio_options['alluxio.worker.page.store.page.size'] = args.alluxio_page_size
+    if args.alluxio_cluster_name:
+        alluxio_options['alluxio.cluster.name'] = args.alluxio_cluster_name
+    if alluxio_options:
+        alluxio_kwargs['options'] = alluxio_options
+    return fsspec.filesystem("alluxio", **alluxio_kwargs)
 
 def train_loop_per_worker():
     worker_rank = train.get_context().get_world_rank()
@@ -205,10 +288,13 @@ def train_loop_per_worker():
 
     world_size = ray.train.get_context().get_world_size()
     all_workers_time_list_across_epochs = []
+    all_workers_sleep_time_list_across_epochs = []
+    start_rx_bytes = get_received_bytes()
     for i in range(args.num_epochs):
         print(f"Epoch {i+1} of {args.num_epochs}")
         num_rows = 0
         start_t = time.time()
+        epoch_sleep_time = 0
 
         # Ray Data needs to call iter_torch_batches on each epoch.
         if isinstance(it, ray.data.iterator.DataIterator):
@@ -223,6 +309,8 @@ def train_loop_per_worker():
                 batch = batch["image"]
             # `batch` should have tensor in `torch.Tensor` format.
             num_rows += batch.size(dim=0)
+            time.sleep(args.train_sleep)
+            epoch_sleep_time += args.train_sleep
             if worker_rank == 0 and num_rows >= print_at:
                 print(
                     f"Read {num_rows} rows on rank "
@@ -230,6 +318,7 @@ def train_loop_per_worker():
                     f"{num_rows / (time.time()  - start_t)}"
                 )
                 print_at = ((num_rows // print_at_interval) + 1) * print_at_interval
+
         end_t = time.time()
         # Workaround to report the epoch start/end time from each worker, so that we
         # can aggregate them at the end when calculating throughput.
@@ -243,7 +332,20 @@ def train_loop_per_worker():
         dist.all_gather(all_workers_time_list, curr_worker_time)
         all_workers_time_list_across_epochs.append(all_workers_time_list)
 
+        all_workers_sleep_times = [
+            torch.zeros((1), dtype=torch.double, device=device)
+            for _ in range(world_size)
+        ]
+        curr_worker_sleep_time = torch.tensor(
+            [epoch_sleep_time], dtype=torch.double, device=device
+        )
+        dist.all_gather(all_workers_sleep_times, curr_worker_sleep_time)
+        all_workers_sleep_time_list_across_epochs.append(all_workers_sleep_times)
+        end_rx_bytes = get_received_bytes()
+        epoch_rx_bytes = end_rx_bytes - start_rx_bytes
+        start_rx_bytes = end_rx_bytes
         print(
+            f"Epoch {i+1} Network Bytes Received: {human_readable(epoch_rx_bytes)}, "
             f"Epoch {i+1} of {args.num_epochs}, tput: {num_rows / (end_t - start_t)}, "
             f"run time: {end_t - start_t}"
         )
@@ -260,10 +362,16 @@ def train_loop_per_worker():
         ]
         for i in range(args.num_epochs)
     }
+    avg_sleep_times_per_epoch = {
+        f"epoch_{i}_avg_sleep_time": sum([tensor.item() for tensor in sleep_times]) / world_size
+        for i, sleep_times in enumerate(all_workers_sleep_time_list_across_epochs)
+    }
+
     train.report(
         {
             **per_epoch_times,
             "num_rows": [tensor.item() for tensor in all_num_rows],
+            **avg_sleep_times_per_epoch
         }
     )
 
@@ -377,14 +485,29 @@ def benchmark_code(
 
             # 1) Read in data with read_images() / read_parquet()
             if args.file_type == "image":
-                ray_dataset = ray.data.read_images(
-                    input_paths,
-                    mode="RGB",
-                )
+                if args.use_alluxio:
+                    alluxio = setup_alluxio(args)
+                    ray_dataset = ray.data.read_images(
+                        input_paths,
+                        mode="RGB",
+                        filesystem=alluxio
+                    )
+                else:
+                    ray_dataset = ray.data.read_images(
+                        input_paths,
+                        mode="RGB"
+                    )
             elif args.file_type == "parquet":
-                ray_dataset = ray.data.read_parquet(
-                    args.data_root,
-                )
+                if args.use_alluxio:
+                    alluxio = setup_alluxio(args)
+                    ray_dataset = ray.data.read_parquet(
+                        args.data_root,
+                        filesystem=alluxio
+                    )
+                else:
+                    ray_dataset = ray.data.read_parquet(
+                        args.data_root,
+                    )
             else:
                 raise Exception(f"Unknown file type {args.file_type}")
 
@@ -403,6 +526,8 @@ def benchmark_code(
     # 3) Train TorchTrainer on processed data
     options = DataConfig.default_ingest_options()
     options.preserve_order = args.preserve_order
+    if args.object_store_memory != -1:
+        options.resource_limits.object_store_memory = args.object_store_memory
 
     torch_trainer = TorchTrainer(
         train_loop_per_worker,
@@ -419,20 +544,41 @@ def benchmark_code(
 
     result = torch_trainer.fit()
 
+
     # Report the average of per-epoch throughput, excluding the first epoch.
     epoch_tputs = []
+    epoch_runtimes = []
+    epoch_sleep_times = []
     num_rows_per_epoch = sum(result.metrics["num_rows"])
-    for i in range(1, args.num_epochs):
+    for i in range(0, args.num_epochs):
         time_start_epoch_i, time_end_epoch_i = zip(*result.metrics[f"epoch_{i}_times"])
         runtime_epoch_i = max(time_end_epoch_i) - min(time_start_epoch_i)
         tput_epoch_i = num_rows_per_epoch / runtime_epoch_i
-        epoch_tputs.append(tput_epoch_i)
-    avg_per_epoch_tput = sum(epoch_tputs) / len(epoch_tputs)
-    print("Total num rows read per epoch:", num_rows_per_epoch, "images")
-    print("Averaged per-epoch throughput:", avg_per_epoch_tput, "img/s")
-    return {
-        BenchmarkMetric.THROUGHPUT.value: avg_per_epoch_tput,
-    }
+        avg_sleep_time_epoch_i = result.metrics.get(f"epoch_{i}_avg_sleep_time", 0)
+
+        if i == 0:
+            print("Epoch 0 throughput:", tput_epoch_i, "img/s")
+            print("Epoch 0 runtime:", runtime_epoch_i, "seconds")
+            print("Epoch 0 sleep time:", avg_sleep_time_epoch_i, "seconds")
+            if args.num_epochs == 1:
+                return {
+                    BenchmarkMetric.THROUGHPUT.value: tput_epoch_i,
+                }
+        else:
+            epoch_tputs.append(tput_epoch_i)
+            epoch_runtimes.append(runtime_epoch_i)
+            epoch_sleep_times.append(avg_sleep_time_epoch_i)
+    if args.num_epochs > 1:
+        avg_per_epoch_tput = sum(epoch_tputs) / len(epoch_tputs)
+        avg_per_epoch_runtime = sum(epoch_runtimes) / len(epoch_runtimes)
+        avg_per_epoch_sleep_time = sum(epoch_sleep_times) / len(epoch_sleep_times)
+        print("Total num rows read per epoch:", num_rows_per_epoch, "images")
+        print("Averaged per-epoch throughput:", avg_per_epoch_tput, "img/s")
+        print("Averaged per-epoch runtime:", avg_per_epoch_runtime, "seconds")
+        print("Averaged per-epoch sleep time:", avg_per_epoch_sleep_time, "seconds")
+        return {
+            BenchmarkMetric.THROUGHPUT.value: avg_per_epoch_tput,
+        }
 
 
 if __name__ == "__main__":
