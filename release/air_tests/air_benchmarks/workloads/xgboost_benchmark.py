@@ -18,6 +18,7 @@ from ray.train import RunConfig, ScalingConfig
 import fsspec
 from alluxiofs import AlluxioFileSystem
 
+import logging
 logging.basicConfig(
     filename='/home/ray/lucy.log',
     level=logging.INFO,
@@ -38,7 +39,7 @@ _EXPERIMENT_PARAMS = {
         "cpus_per_worker": 1,
     },
     "10G": {
-        "data": "s3://lucybucket2024/10G-xgboost-data/",
+        "data": "s3://lucybucket2024/10G-xgboost-data.parquet/",
         "num_workers": 1,
         "cpus_per_worker": 1,
     },
