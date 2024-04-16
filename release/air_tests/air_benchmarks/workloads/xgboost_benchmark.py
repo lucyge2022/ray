@@ -18,6 +18,12 @@ from ray.train import RunConfig, ScalingConfig
 import fsspec
 from alluxiofs import AlluxioFileSystem
 
+logging.basicConfig(
+    filename='/home/ray/lucy.log',
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+
 _XGB_MODEL_PATH = "model.json"
 _TRAINING_TIME_THRESHOLD = 1000
 _PREDICTION_TIME_THRESHOLD = 450
@@ -34,7 +40,7 @@ _EXPERIMENT_PARAMS = {
     "10G": {
         "data": "s3://lucybucket2024/10G-xgboost-data/",
         "num_workers": 1,
-        "cpus_per_worker": 12,
+        "cpus_per_worker": 1,
     },
     "100G": {
         "data": "s3://air-example-data-2/100G-xgboost-data.parquet/",
@@ -104,6 +110,7 @@ def setup_alluxio(args):
 
 @run_and_time_it
 def run_xgboost_training(data_path: str, num_workers: int, cpus_per_worker: int, args):
+    print(f"LUCYDEBUG:{data_path}") 
     if args.use_alluxio:
         alluxio = setup_alluxio(args)
         ds = data.read_parquet(data_path, filesystem = alluxio)
