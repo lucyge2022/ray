@@ -133,7 +133,7 @@ def run_xgboost_training(data_path: str, num_workers: int, cpus_per_worker: int,
         params=params,
         datasets={"train": ds},
         run_config=RunConfig(
-            storage_path="/mnt/cluster_storage", name="xgboost_benchmark"
+            storage_path="/home/ray/cluster_storage", name="xgboost_benchmark"
         ),
     )
     result = trainer.fit()
