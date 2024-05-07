@@ -1012,8 +1012,11 @@ IMAGENET_WNID_TO_LABEL = _get_sysnet_mapping()
 SORTED_WNIDS = sorted(IMAGENET_WNID_TO_LABEL.keys())
 IMAGENET_WNID_TO_ID = {wnid: SORTED_WNIDS.index(wnid) for wnid in SORTED_WNIDS}
 
-IMG_S3_ROOT = "s3://anyscale-imagenet/ILSVRC/Data/CLS-LOC/train"
-PARQUET_S3_DIR = "s3://anyscale-imagenet/parquet"
+# IMG_S3_ROOT = "s3://anyscale-imagenet/ILSVRC/Data/CLS-LOC/train"
+IMG_S3_ROOT = "s3://ai-ref-arch/imagenet-full/train"
+# PARQUET_S3_DIR = "s3://anyscale-imagenet/parquet"
+# Total Objects: 903 Total Size: 208.1 GiB
+PARQUET_S3_DIR = "s3://ai-ref-arch/imagenet-full-parquet/train/3Xd3defc4/"
 PARQUET_S3_ROOT = f"{PARQUET_S3_DIR}/d76458f84f2544bdaac158d1b6b842da"
 
 
@@ -1042,21 +1045,23 @@ def get_prop_parquet_paths(num_workers, target_worker_gb):
         # Return the entire dataset.
         return PARQUET_S3_DIR
 
-    mb_per_file = 128
-    num_files = 200
+    mb_per_file = 230
+    num_files = 903
     TARGET_NUM_FILES = min(
         math.ceil(target_worker_gb * num_workers * 1024 / mb_per_file), num_files
     )
     file_paths = []
-    for fi in range(num_files):
-        for i in range(5):
-            if not (fi in [163, 164, 174, 181, 183, 190] and i == 4):
-                # for some files, they only have 4 shards instead of 5.
-                file_paths.append(f"{PARQUET_S3_ROOT}_{fi:06}_{i:06}.parquet")
-            if len(file_paths) >= TARGET_NUM_FILES:
-                break
-        if len(file_paths) >= TARGET_NUM_FILES:
-            break
+    # for fi in range(num_files):
+    #     for i in range(5):
+    #         if not (fi in [163, 164, 174, 181, 183, 190] and i == 4):
+    #             # for some files, they only have 4 shards instead of 5.
+    #             file_paths.append(f"{PARQUET_S3_ROOT}_{fi:06}_{i:06}.parquet")
+    #         if len(file_paths) >= TARGET_NUM_FILES:
+    #             break
+    #     if len(file_paths) >= TARGET_NUM_FILES:
+    #         break
+    for i in range(TARGET_NUM_FILES):
+        file_paths.append(f"{PARQUET_S3_DIR}imagenet_{i}.parquet")
     return file_paths
 
 
