@@ -829,15 +829,6 @@ def benchmark_code(
         time_start_epoch_i, time_end_epoch_i = zip(*result.metrics[f"epoch_{i}_times"])
         runtime_epoch_i = max(time_end_epoch_i) - min(time_start_epoch_i)
         tput_epoch_i = num_rows_per_epoch / runtime_epoch_i
-    #     epoch_tputs.append(tput_epoch_i)
-    # avg_per_epoch_tput = sum(epoch_tputs) / len(epoch_tputs)
-    # print("Total num rows read per epoch:", num_rows_per_epoch, "images")
-    # print("Averaged per-epoch throughput:", avg_per_epoch_tput, "img/s")
-    # data_benchmark_metrics.update(
-    #     {
-    #         BenchmarkMetric.THROUGHPUT: avg_per_epoch_tput,
-    #     }
-    # )
         avg_sleep_time_epoch_i = result.metrics.get(f"epoch_{i}_avg_sleep_time", 0)
 
         if i == 0:
